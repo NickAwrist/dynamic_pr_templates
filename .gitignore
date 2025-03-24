@@ -1,0 +1,5 @@
+/.idea/
+dynamic_pr_templates.iml
+package-lock.json
+/node_modules
+/dist
