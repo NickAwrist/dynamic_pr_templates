@@ -1,5 +1,4 @@
-## Bug Fix
-
+# Bug Fix
 
 ## Problem
 Describe the problem that was fixed. Include a link to the issue if applicable.
