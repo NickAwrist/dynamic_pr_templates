@@ -1,6 +1,148 @@
 import { Probot, Context} from "probot";
+import path from "path";
+import fs from "fs";
+
+interface CustomPayload {
+    repositories?: Array<{name: string; owner: {login: string}}>;
+    installation?: {
+        repositories: Array<{name: string}>;
+        account: {login: string};
+    };
+    repository?: {name: string; owner: {login: string}};
+}
 
 export default (app: Probot) => {
+
+    app.on(["installation.created", "installation_repositories.added"], async (context: Context) => {
+
+        const payload = context.payload as CustomPayload;
+
+        const repos = payload.repositories ||
+           (payload.installation?.repositories) ||
+           [payload.repository];
+
+        if(!repos || repos.length === 0){
+           app.log.error("No repositories found");
+           return;
+        }
+
+        // Initialize templates for each repository
+        for(const repo of repos) {
+           await initializeTemplates(context, repo);
+        }
+
+
+    });
+
+    async function initializeTemplates(context: Context, repo: any) {
+
+        const payload = context.payload as CustomPayload;
+
+        const owner = repo.owner?.login || payload.installation?.account.login;
+        const repoName = repo.name;
+
+        if(!owner || !repoName) {
+            app.log.error("Missing owner or repo name");
+            return;
+        }
+
+        try {
+            // Get the default branch
+            const repoInfo = await context.octokit.repos.get({
+                owner,
+                repo: repoName
+            });
+
+            const defaultBranch = repoInfo.data.default_branch;
+
+            // Create a new branch for template init
+            const branchName = "dynamic-pr-templates";
+
+            const refData = await context.octokit.git.getRef({
+                owner,
+                repo: repoName,
+                ref: `heads/${defaultBranch}`
+            });
+
+            const sha = refData.data.object.sha;
+
+            // Create a new branch from the default branch
+            try{
+                await context.octokit.git.createRef({
+                    owner,
+                    repo: repoName,
+                    ref: `refs/heads/${branchName}`,
+                    sha
+                });
+            } catch (error) {
+                app.log.info(`Branch ${branchName} already exists or could not be created: ${error}`);
+            }
+
+            // Read template files from your init_files directory
+            const initFilesPath = path.join(__dirname, "init_files");
+            const files = getFilesFromDirectory(initFilesPath);
+
+            // Create commit with template files
+            for (const file of files) {
+                const relativePath = file.replace(initFilesPath, "");
+                const content = fs.readFileSync(file, "utf-8");
+
+                try {
+                    // Create or update file in the new branch
+                    await context.octokit.repos.createOrUpdateFileContents({
+                        owner,
+                        repo: repoName,
+                        path: `.github${relativePath}`,
+                        message: `Add PR template: ${relativePath}`,
+                        content: Buffer.from(content).toString("base64"),
+                        branch: branchName
+                    });
+
+                    app.log.info(`Created template file: .github${relativePath}`);
+                } catch (error) {
+                    app.log.error(`Error creating template file: ${error}`);
+                }
+            }
+
+            // Create a pull request to merge the changes
+            try {
+                await context.octokit.pulls.create({
+                    owner,
+                    repo: repoName,
+                    title: "[SETUP] Add dynamic PR templates",
+                    head: branchName,
+                    base: defaultBranch,
+                    body: "This PR adds dynamic PR templates to your repository. You can customize these templates by editing the files in the `.github/pr_templates` directory."
+                });
+
+                app.log.info(`Created PR to merge template files into ${defaultBranch}`);
+            } catch (error) {
+                app.log.error(`Error creating PR: ${error}`);
+            }
+        } catch (error) {
+            app.log.error(`Error initializing templates for ${owner}/${repoName}: ${error}`);
+        }
+    }
+
+    // Helper function to get all files in a directory recursively
+    function getFilesFromDirectory(dir: string): string[] {
+        let results: string[] = [];
+        const list = fs.readdirSync(dir);
+
+        list.forEach((file) => {
+            const filePath = path.join(dir, file);
+            const stat = fs.statSync(filePath);
+
+            if (stat && stat.isDirectory()) {
+                results = results.concat(getFilesFromDirectory(filePath));
+            } else {
+                results.push(filePath);
+            }
+        });
+
+        return results;
+    }
+
     app.on(["pull_request.opened"], async (context: Context) => {
         if(!("pull_request" in context.payload)) {
             console.log("No pull request found in the context");
