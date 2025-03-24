@@ -2,49 +2,65 @@ import { Probot, Context} from "probot";
 import path from "path";
 import fs from "fs";
 
-interface CustomPayload {
-    repositories?: Array<{name: string; owner: {login: string}}>;
-    installation?: {
-        repositories: Array<{name: string}>;
-        account: {login: string};
-    };
-    repository?: {name: string; owner: {login: string}};
-}
-
 export default (app: Probot) => {
 
     app.on(["installation.created", "installation_repositories.added"], async (context: Context) => {
+        const payload = context.payload as any;
+        let repos: any[] = [];
 
-        const payload = context.payload as CustomPayload;
+        if (payload.action === "added" && Array.isArray(payload.repositories_added)) {
+            // For installation_repositories.added event
+            repos = payload.repositories_added.map((repo: any) => ({
+                ...repo,
+                owner: { login: payload.installation.account.login }
+            }));
+        } else if (payload.repositories) {
+            // For other events with repositories array
+            repos = payload.repositories;
+        } else if (payload.repository) {
+            // For single repository events
+            repos = [payload.repository];
+        } else {
+            app.log.error("No repositories found");
+            return;
+        }
 
-        const repos = payload.repositories ||
-           (payload.installation?.repositories) ||
-           [payload.repository];
-
-        if(!repos || repos.length === 0){
-           app.log.error("No repositories found");
-           return;
+        if (repos.length === 0) {
+            app.log.error("No repositories found");
+            return;
         }
 
         // Initialize templates for each repository
-        for(const repo of repos) {
-           await initializeTemplates(context, repo);
+        for (const repo of repos) {
+            await initializeTemplates(context, repo);
         }
-
-
     });
 
     async function initializeTemplates(context: Context, repo: any) {
+        const payload = context.payload as any;
 
-        const payload = context.payload as CustomPayload;
+        let owner: string;
+        let repoName: string;
 
-        const owner = repo.owner?.login || payload.installation?.account.login;
-        const repoName = repo.name;
+        if (repo.owner && repo.owner.login) {
+            // Standard repository object with owner property
+            owner = repo.owner.login;
+        } else if (payload.installation && payload.installation.account) {
+            // For installation_repositories events
+            owner = payload.installation.account.login;
+        } else {
+            app.log.error("Could not determine repository owner");
+            return;
+        }
 
-        if(!owner || !repoName) {
+        repoName = repo.name;
+
+        if (!owner || !repoName) {
             app.log.error("Missing owner or repo name");
             return;
         }
+
+        app.log.info(`Initializing templates for ${owner}/${repoName}`);
 
         try {
             // Get the default branch
